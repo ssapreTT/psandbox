@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title> Comparison of Performance Reports </title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Performance Analysis">
+  <meta name="author" content="Samvit Kaul; Shreeniwas Sapre">
+
+  <!-- JQUERY -->
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.1/jquery.min.js"></script>
+
+  <!-- BOOTSTRAP -->
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css">
+  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+
+  <!-- GOOGLE VISUALIZATION -->
+<script type="text/javascript" src='https://www.gstatic.com/charts/loader.js'></script>
+<script type="text/javascript">
+  google.charts.load('current', {packages:["corechart","table","controls"]});
+  google.charts.setOnLoadCallback(drawVisualization);
+  function savecsv(tbl, fname)
+  {
+      var hdrstr = tbl[0].join();
+      var datstr = tbl.slice(1).map(function(obj){
+          var rowstr = obj.join();
+          return rowstr;
+      }).join("\n");
+      var csvstr = hdrstr + "\n" + datstr + "\n";
+
+      var proxy = document.getElementById("saveproxy");
+      proxy.download = fname;
+      proxy.href = 'data:application/csv;charset=utf-8,' + encodeURIComponent(csvstr);
+      proxy.target = '_blank';
+      proxy.click()
+
+}
+    var abs_val_table = {{ abs_val_table }};
+
+  function drawVisualization()
+  {
+
+    var tblcolSummaryOptions = {
+        'allowHtml'     : true,
+        'showRowNumber' : true,
+        'page'          : 'enable',
+        'pageSize'      : 5,
+        'frozenColumns' : 4,
+    };
+
+    var tblChartOptions = {
+        'allowHtml'     : true,
+        'showRowNumber' : true,
+        'page'          : 'enable',
+        'pageSize'      : 25,
+        'frozenColumns' : 4,
+    };
+    var uioptions = {
+        'labelStacking'       : 'vertical',
+        'selectedValuesLayout': 'belowStacked'
+    };
+    var uioptions_ratio = {
+        'labelStacking'       : 'vertical',
+        'selectedValuesLayout': 'belowStacked',
+        'minValue'            : 0.0,
+        'maxValue'            : 1.0,
+        'unitIncrement'       : 0.01,
+        'blockIncrement'      : 0.1,
+    };
+    var percentFormat    = new google.visualization.NumberFormat({fractionDigits: 2, suffix: "%"});
+    var noDecimalFormat  = new google.visualization.NumberFormat({fractionDigits: 0});
+    var twoDecimalFormat = new google.visualization.NumberFormat({fractionDigits: 2});
+    var highlightFormat  = new google.visualization.ColorFormat(); highlightFormat.addRange({{error_bar}},'white','green');
+    var diffTwoDecimalFormat = new google.visualization.NumberFormat({negativeColor: 'red', fractionDigits: 2});
+
+    var filters = {{filter_desc}};
+    var filter_divs_in_effect = Array();
+    for(var i=0; i < filters.length; i++){
+        var filtertype = filters[i][1];
+        filter_divs_in_effect.push('filter-' + i + '-div')
+        if (filtertype == 'CategoryFilter') {
+            filter_divs_in_effect.push('filter-' + i + '-1-div');
+        }
+    }
+    var filterstr = filter_divs_in_effect.map(function(divname){
+        return '<div class="col-md-3" id="' + divname + '"></div>';
+    }).join('\n');
+    filterstr = '<div class="row">\n' + filterstr + '\n</div>\n';
+    document.getElementById('abs-stat-filter-div').innerHTML = filterstr;
+    filterObjs = [];
+    for(var i=0; i < filters.length; i++){
+        var origcolname    = filters[i][0];
+        var filtertype = filters[i][1];
+        var options    = uioptions;
+        if(filtertype == 'NumberRangeFilter'){
+            var colname = origcolname + '_Ratio';
+            options = uioptions_ratio;
+        }else{
+            var colname = origcolname + '_1';
+            options = uioptions;
+        }
+        var filterdiv  = 'filter-' + i + '-div';
+        filterObjs.push(new google.visualization.ControlWrapper({
+            'controlType': filtertype,
+            'containerId': filterdiv,
+            'options': {
+                'filterColumnLabel': colname,
+                'ui': options
+            }}));
+        if (filtertype != 'NumberRangeFilter') {
+            var colname = origcolname + '_Result';
+            options = uioptions;
+            var filterdiv  = 'filter-' + i + '-1-div';
+            filterObjs.push(new google.visualization.ControlWrapper({
+                'controlType': filtertype,
+                'containerId': filterdiv,
+                'options': {
+                    'filterColumnLabel': colname,
+                    'ui': uioptions
+                }}));
+        }
+    }
+
+
+    var sDashBoard  = new google.visualization.Dashboard(document.getElementById('comparison-summary-dashboard-div'));
+    var sTableChart = new google.visualization.ChartWrapper({
+        'chartType'  : 'Table',
+        'containerId': 'comparison-summary-tbl-div',
+        'options'    : tblcolSummaryOptions
+    });
+    var sFilter = new google.visualization.ControlWrapper({
+        'controlType': 'CategoryFilter',
+        'containerId': 'comparison-summary-filter-div',
+        'options'    : { 'filterColumnLabel': 'Colname', 'ui': uioptions }
+    });
+    document.getElementById('colpagesize-dropdown').addEventListener('change', function() {
+        tblcolSummaryOptions.setOption('pageSize', parseInt(this.value));
+        sTableChart.draw();
+    });
+
+    var summary_val_table = {{summary_table}};
+    var summaryDataTable  = google.visualization.arrayToDataTable(summary_val_table,false);
+    sDashBoard.bind( [sFilter], sTableChart ).draw(summaryDataTable);
+
+    var cDashBoard  = new google.visualization.Dashboard(document.getElementById('abs-stat-dashboard-div'));
+    var cTableChart = new google.visualization.ChartWrapper({
+        'chartType'  : 'Table',
+        'containerId': 'abs-stat-tbl-div',
+        'options'    : tblChartOptions
+    });
+    var absDataTable  = google.visualization.arrayToDataTable(abs_val_table,false);
+
+    {{ numeric_cols }}.map(function(c) { twoDecimalFormat.format(absDataTable,c) });
+    {{ cmp_cols }}.map(function(c){highlightFormat.format(absDataTable,c)});
+    {{ different_cols }}.map(function(c){diffTwoDecimalFormat.format(absDataTable,c)});
+    cDashBoard.bind( filterObjs, cTableChart ).draw(absDataTable);
+    /* TODO: Make sure this works even if no filters are specified by users
+       i.e. filterObjs array is empty */
+
+<!--    /* TODO: GroupBy support-->
+<!--    var grpDataTable = new google.visualization.data.group(absDataTable,[{ {grp_col} }],[-->
+<!--            {column: { {grp1_col} }, aggregation:google.visualization.data.sum, type:'number'},-->
+<!--            {column: { {grp2_col} }, aggregation:google.visualization.data.sum, type:'number'},-->
+<!--    ]);-->
+
+<!--    [0,1].map(function(c){ noDecimalFormat.format(grpDataTable,c);});-->
+<!--    var xDashBoard  = new google.visualization.Dashboard(document.getElementById('abs-stat-summary-dashboard-div'));-->
+<!--    var xTableChart = new google.visualization.ChartWrapper({-->
+<!--        'chartType'  : 'Table',-->
+<!--        'containerId': 'abs-stat-summary-tbl-div',-->
+<!--        'options'    : tblChartOptions-->
+<!--    });-->
+<!--    var xFilter = new google.visualization.ControlWrapper({-->
+<!--        'controlType': 'CategoryFilter',-->
+<!--        'containerId': 'abs-stat-summary-title-div',-->
+<!--        'options'    : { 'filterColumnLabel': { {filtercolname} }, 'ui': uioptions }-->
+<!--    });-->
+<!--    xDashBoard.bind( [ xFilter ], xTableChart ).draw(grpDataTable);-->
+<!--    */-->
+
+  }
+</script>
+</head>
+
+<body>
+  <div class="container-fluid"> <!-- toplevel container -->
+    <div class="row-fluid"> <!-- toplevel-1 -->
+    <h1><center>Comparison of Performance Reports</center></h1>
+
+    <h2> Information </h2>
+    <table class="table table-striped table-bordered">
+        <thead><th scope="col">Attribute</th><th scope="col">Value</th></thead>
+        <tbody>
+        <th scope="row">csv1</th><td>{{run1_name}}</td></tr>
+        <th scope="row">csv2</th><td>{{run2_name}}</td></tr>
+        <th scope="row">error-bar</th><td>{{epsilon_str}}</td></tr>
+        <th scope="row">result</th><td>{{result_final}}</td></tr>
+        </tbody>
+    </table>
+
+    <HR>
+    <h2> Comparison Summary</h2>
+    <div id="comparison-summary-title-div"></div>
+    <div id="comparison-summary-dashboard-div">
+        <div id="comparison-summary-filter-div"></div>
+        <div id="comparison-summary-pagesize-div">
+            Page Size:
+            <select name="Pagesize" id="colpagesize-dropdown">
+                <option value="5">5</option>
+                <option value="10">10</option>
+                <option value="25">25</option>
+            </select>
+        </div>
+        <div id="comparison-summary-tbl-div"></div>
+    </div>
+
+<!--TODO BEGIN>
+    <HR>
+    <h2> Summary Grouped By({ {filtercolname} })</h2>
+    <div id="abs-stat-summary-title-div"></div>
+        <div id="abs-stat-summary-dashboard-div">
+        <div id="abs-stat-summary-tbl-div"></div>
+    </div>
+<TODO END-->
+
+
+    <HR>
+    <h1> Details </h2>
+    <div id="abs-stat-title-div"></div>
+    <div id="save-as-csv">
+      <br>
+      <button onclick="savecsv(abs_val_table, 'save.csv');">Export Data As CSV</button>
+      <a href="#" id="saveproxy" style="visibility: hidden"></a>
+    </div>
+    <div id="abs-stat-dashboard-div">
+        <div id="abs-stat-filter-div"></div><br>
+        <div id="abs-stat-tbl-div"></div>
+    </div>
+
+    </div> <!-- toplevel-1 -->
+  </div> <!-- toplevel container -->
+</body>
+</html>

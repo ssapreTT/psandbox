@@ -15,6 +15,8 @@ from pathlib import Path
 from collections import namedtuple, Counter, defaultdict
 from ttsim.utils.common import print_csv
 from typing import Tuple, Any, Literal
+from collections.abc import Iterable, Sequence
+import tools.statattr as statattr
 
 logfile = open('comparison-log.txt', 'w')
 
@@ -30,6 +32,18 @@ class ComparisonStatus(str, Enum):
     ApproxMatch = 'approx_match'
     Match = 'match'
 
+
+class Jinja2Environment:
+    def __init__(self) -> None:
+        self.env = Environment(
+            loader=PackageLoader('tools', 'templates'),
+            undefined=StrictUndefined
+            # autoescape=select_autoescape(['html']
+              )
+
+    def render(self, template_name: str, context: dict[str, Any]) -> str:
+        template = self.env.get_template(template_name)
+        return template.render(context)
 
 def flatten_dict(d: dict[str, Any], param_sep: str='_') -> dict[str, Any]:
     """
@@ -265,12 +279,13 @@ class ProjectionRun:
 
 
 class StudyComparison:
-    def __init__(self, path1: Path, path2: Path, output_path: Path, epsilon: float, study: str) -> None:
+    def __init__(self, path1: Path, path2: Path, output_path: Path, epsilon: float, study: str, jinja2env: Jinja2Environment) -> None:
         self.study = study
         self.run1 = ProjectionRun(path1, self.study)
         self.run2 = ProjectionRun(path2, self.study)
         self.epsilon = epsilon
         self.output_path = output_path
+        self.jinja2env = jinja2env
         os.makedirs(self.output_path, exist_ok=True)
         self.keys_classified = self.run1.classify_keys(self.run2)
 
@@ -291,6 +306,225 @@ class StudyComparison:
         }
         return result
 
+    def generate_cfgsummaries(self, config_result: dict[str, Any]) -> None:
+        status_frequency: Counter = Counter()
+        cfgsummary_data = []
+        sr = 0
+        for cfg, cfgstatus in sorted(config_result['elem_status'].items()):
+            sr += 1
+            row = [sr, cfg, cfgstatus['rollup_status'].value, '']
+            cfgsummary_data.append(row)
+            status_frequency[cfgstatus['rollup_status']] += 1
+        cfgsummary_data_json = json.dumps(cfgsummary_data, indent=4)
+
+        jdict = {}
+        jdict['cfg_compare_result'] = config_result['rollup_status'].value
+        jdict['config_dataset'] = cfgsummary_data_json
+        jdict['config_columns'] = ['Sr', 'Config', 'Status', 'Link']
+        jdict['study_name'] = self.study
+        jdict['run1_name'] = self.run1.rootpath.stem
+        jdict['run2_name'] = self.run2.rootpath.stem
+        jdict['exact_matches'] = status_frequency[ComparisonStatus.Match]
+        jdict['approx_matches'] = status_frequency[ComparisonStatus.ApproxMatch]
+        jdict['mismatches'] = status_frequency[ComparisonStatus.Mismatch]
+        jdict['only_in_1_or_2'] = status_frequency[ComparisonStatus.Only_in_1] + status_frequency[ComparisonStatus.Only_in_2]
+        jdict['total'] = len(config_result['elem_status'])
+        cfgsummary_html = self.jinja2env.render('template-cfgsummary.html', jdict)
+        open(self.output_path / self.study / 'cfgsummary.html', 'w').write(cfgsummary_html)
+
+
+    def generate_jobsummaries_datatable(self, job_result: dict[str, Any]) -> None:
+        status_frequency: Counter = Counter()
+        jobsummary_data = []
+        sr = 0
+        job_columns : list[str] = []
+        html_table_rows = []
+        html_table_header_row_1 = ['<th rowspan="2">Sr</th>', '<th rowspan="2">Job</th>', '<th rowspan="2">Status</th>']
+        html_table_header_row_2 = []
+        first_key = next((k for k in job_result['elem_status']))
+        first_jobstatus = job_result['elem_status'][first_key]
+        for col, colentry in first_jobstatus['elem_status'].items():
+            # Reduce length by 1 - since we do NOT add the "type" column
+            html_table_header_row_1.append(f'<th colspan="{len(first_jobstatus["elem_status"][col])-1}">{col}</th>')
+            for col2 in colentry:
+                html_table_header_row_2.append(f'<th>{col2}</th>')
+        for job, jobstatus in sorted(job_result['elem_status'].items()):
+            sr += 1
+            row = [sr, job, jobstatus['rollup_status'].value]
+            status_frequency[jobstatus['rollup_status']] += 1
+            elem_status = jobstatus['elem_status']
+            if job_columns == []:
+                job_columns.extend(['Sr', 'Job', 'Status'])
+                for col, colentry in elem_status.items():
+                    if col in ATTRIBUTES_TO_SKIP:
+                        continue
+                    first_flag = True
+                    for col2 in colentry:
+                        if col2 in ATTRIBUTES_TO_SKIP:
+                            continue
+                        if first_flag:
+                            job_columns.append(col + '&rarr;<br>' + col2)
+                            first_flag = False
+                        else:
+                            job_columns.append(col2)
+            for col, colentry in elem_status.items():
+                if col in ATTRIBUTES_TO_SKIP:
+                    continue
+                for col2, col2value in colentry.items():
+                    if col2 in ATTRIBUTES_TO_SKIP:
+                        continue
+                    if isinstance(col2value, ComparisonStatus):
+                        row.append(col2value.value)
+                    elif isinstance(col2value, float):
+                        row.append(f'{col2value:.3f}')
+                    else:
+                        row.append(str(col2value))
+                # row.extend([str(col2value) if not isinstance(col2value, ComparisonStatus) else col2value.value for col2, col2value in colentry.items()])
+            jobsummary_data.append(row)
+            html_table_rows.append('\n'.join(['<tr>'] + [f'<td>{x}</td>' for x in row] + ['</tr>']))
+            assert len(job_columns) == len(row)
+        html_header = '\n'.join(['<tr>'] + html_table_header_row_1 + ['</tr>', '<tr>'] + html_table_header_row_2 + ['</tr>'])
+        html_table = '\n'.join(['<thead>', '<tr>'] + html_table_header_row_1 + ['</tr>', '<tr>'] + html_table_header_row_2 + ['</tr>', '</thead>'])
+        html_table += '\n'.join(html_table_rows)
+        jobsummary_data_json = json.dumps(jobsummary_data, indent=4)
+
+        jdict = {}
+        jdict['job_compare_result'] = job_result['rollup_status'].value
+        jdict['job_dataset'] = jobsummary_data_json
+        jdict['job_html_header'] = html_header
+        jdict['job_html_body'] = '\n'.join(html_table_rows)
+        jdict['job_columns'] = job_columns
+        jdict['study_name'] = self.study
+        jdict['run1_name'] = self.run1.rootpath.stem
+        jdict['run2_name'] = self.run2.rootpath.stem
+        jdict['exact_matches'] = status_frequency[ComparisonStatus.Match]
+        jdict['approx_matches'] = status_frequency[ComparisonStatus.ApproxMatch]
+        jdict['mismatches'] = status_frequency[ComparisonStatus.Mismatch]
+        jdict['only_in_1_or_2'] = status_frequency[ComparisonStatus.Only_in_1] + status_frequency[ComparisonStatus.Only_in_2]
+        jdict['total'] = len(job_result['elem_status'])
+
+        jobsummary_html = self.jinja2env.render('template-jobsummary.html', jdict)
+        open(self.output_path / self.study / 'jobsummary.html', 'w').write(jobsummary_html)
+
+    def generate_jobsummaries_gchart(self, job_result: dict[str, Any]) -> None:
+        jobsummary_data: list[list[int|str]] = []
+        sr = 0
+        job_columns : list[str] = []
+        attr_in_seq = sorted(statattr.AttributeDescriptors.job_attributes, key=lambda x: x.seq)
+        hlcol_2_desc = {attrdesc.name: attrdesc for ndx, attrdesc in enumerate(sorted(statattr.AttributeDescriptors.job_attributes, key=lambda x: x.seq))}
+        hlcolseq = [attrdesc.name for attrdesc in attr_in_seq]
+        table_col_seq: list[str|int] = ['Sr']   # Type changed to str|int for compatibility with jobsummary_data
+        for attrdesc in attr_in_seq:
+            # table_col_seq.append(attrdesc.name + '&rarr;' + '1')
+            table_col_seq.append(attrdesc.name + '_' + '1')
+            if attrdesc.is_numeric:
+                table_col_seq.extend([f'{attrdesc.name}_{suffix}' for suffix in ['2', 'Result', 'Diff', 'Ratio']])
+            else:
+                table_col_seq.extend([f'{attrdesc.name}_{suffix}' for suffix in ['2', 'Result']])
+        table_rows: list[str] = []
+        # html_table_rows = []
+        # html_table_header_row_1 = ['<th rowspan="2">Sr</th>', '<th rowspan="2">Job</th>', '<th rowspan="2">Status</th>']
+        # html_table_header_row_2 = []
+        # first_key = next((k for k in job_result['elem_status']))
+        # first_jobstatus = job_result['elem_status'][first_key]
+        # for col, colentry in first_jobstatus['elem_status'].items():
+        #     # Reduce length by 1 - since we do NOT add the "type" column
+        #     html_table_header_row_1.append(f'<th colspan="{len(first_jobstatus["elem_status"][col])-1}">{col}</th>')
+        #     for col2 in colentry:
+        #         html_table_header_row_2.append(f'<th>{col2}</th>')
+
+        status_frequency: Counter = status_2_freqcount([jobstat['rollup_status'] for jobstat in job_result['elem_status'].values()])
+        col_num_matches: Counter = Counter()
+
+        jobsummary_data.append(table_col_seq)
+
+        compute_columns: list[int] = []
+        numeric_columns: list[int] = []
+        different_columns: list[int] = []
+        same_columns: list[int] = []
+        filter_columns = []
+        for colname, coldesc in hlcol_2_desc.items():
+            if not coldesc.is_filter:
+                continue
+            if coldesc.is_numeric:
+                filter_columns.append([colname, 'NumberRangeFilter'])
+            else:
+                filter_columns.append([colname, 'CategoryFilter'])
+
+        for job, jobstatus in job_result['elem_status'].items():
+            elem_status = jobstatus['elem_status']
+            for col, colstatus in elem_status.items():
+                if colstatus['status'] == ComparisonStatus.Match:
+                    col_num_matches[col] += 1
+
+        num_jobs = len(job_result['elem_status'])
+        for job, jobstatus in sorted(job_result['elem_status'].items()):
+            sr += 1
+            row: list[int|str] = [sr] # , job, jobstatus['rollup_status'].value]
+            # status_frequency[jobstatus['rollup_status']] += 1
+            elem_status = jobstatus['elem_status']
+            for col in hlcolseq:
+                curr_rowlen = len(row)
+                col_status = elem_status[col]
+                col_desc = hlcol_2_desc[col]
+                if col_desc.is_numeric:
+                    row.extend([col_status['value1'], col_status['value2'], col_status['diff'], col_status['ratio'], col_status['status'].value])
+                    if sr == 1:
+                        numeric_columns.extend([curr_rowlen, curr_rowlen+1, curr_rowlen+2, curr_rowlen+3])
+                else:
+                    row.extend([col_status['value1'], col_status['value2'], col_status['status'].value])
+                table_columns_for_col = [i for i in range(curr_rowlen, len(row))]
+                if sr == 1:
+                    if col_desc.catg == 'comp':
+                        compute_columns.extend(table_columns_for_col)
+                    if col_num_matches[col] != num_jobs:
+                        different_columns.extend(table_columns_for_col)
+                    else:
+                        same_columns.extend(table_columns_for_col)
+            jobsummary_data.append(row)
+            # html_table_rows.append('\n'.join(['<tr>'] + [f'<td>{x}</td>' for x in row] + ['</tr>']))
+            assert len(table_col_seq) == len(row)
+        # html_header = '\n'.join(['<tr>'] + html_table_header_row_1 + ['</tr>', '<tr>'] + html_table_header_row_2 + ['</tr>'])
+        # html_table = '\n'.join(['<thead>', '<tr>'] + html_table_header_row_1 + ['</tr>', '<tr>'] + html_table_header_row_2 + ['</tr>', '</thead>'])
+        # html_table += '\n'.join(html_table_rows)
+        colsummary_data: list[Any] = []
+        colsummary_data.append(['Colname', 'Catg', '#Matches', 'Total', 'Status'])
+        for col, colmatches in col_num_matches.items():
+            if col not in hlcol_2_desc:
+                continue
+            colsummary_data.append([col, hlcol_2_desc[col].catg,  colmatches, num_jobs, 'Match' if colmatches == num_jobs else 'Mismatch'])
+
+
+        jobsummary_data_json = json.dumps(jobsummary_data, indent=4)
+
+        jdict = {}
+        jdict['result_final'] = job_result['rollup_status'].value
+        # jdict['job_dataset'] = jobsummary_data_json
+        jdict['abs_val_table'] = jobsummary_data_json
+        jdict['error_bar'] = ','.join([str(y) for y in [1-self.epsilon,1+self.epsilon]])
+        jdict['filter_desc'] = json.dumps(filter_columns)
+        jdict['numeric_cols'] = json.dumps(numeric_columns, indent=4)
+        jdict['cmp_cols'] = json.dumps([attrdesc_2.name for attrdesc_2 in attr_in_seq if attrdesc_2.catg == 'comp'], indent=4)
+        jdict['different_cols'] = json.dumps(different_columns, indent=4)
+        jdict['same_cols'] = json.dumps(same_columns, indent=4)
+
+        # jdict['job_html_header'] = html_header
+        # jdict['job_html_body'] = '\n'.join(html_table_rows)
+        # jdict['job_columns'] = job_columns
+        # TODO: Prepare the summary_table
+        jdict['summary_table'] = json.dumps(colsummary_data, indent=4)
+        jdict['study_name'] = self.study
+        jdict['run1_name'] = self.run1.rootpath.stem
+        jdict['run2_name'] = self.run2.rootpath.stem
+        jdict['exact_matches'] = status_frequency[ComparisonStatus.Match]
+        jdict['approx_matches'] = status_frequency[ComparisonStatus.ApproxMatch]
+        jdict['mismatches'] = status_frequency[ComparisonStatus.Mismatch]
+        jdict['only_in_1_or_2'] = status_frequency[ComparisonStatus.Only_in_1] + status_frequency[ComparisonStatus.Only_in_2]
+        jdict['total'] = len(job_result['elem_status'])
+        jdict['epsilon_str'] = f'{self.epsilon:.3e}'
+
+        jobsummary_html = self.jinja2env.render('template-cmpperf.html', jdict)
+        open(self.output_path / self.study / 'jobsummary.html', 'w').write(jobsummary_html)
 
     def compare_summary_dir(self) -> dict[str, Any]:
         os.makedirs(self.output_path / self.study, exist_ok=True)
@@ -396,8 +630,10 @@ class StudyComparison:
         logging.info("Comparing %s <-> %s", study_path1, study_path2)
 
         config_result = self.compare_config_dir()
+        self.generate_cfgsummaries(config_result)
 
         job_result = self.compare_summary_dir()
+        self.generate_jobsummaries_gchart(job_result)
 
         stat_result = self.compare_stat_dir()
 
@@ -414,11 +650,12 @@ class StudyComparison:
 
 
 class ProjComparison:
-    def __init__(self, path1: Path, path2: Path, output_path: Path, epsilon: float) -> None:
+    def __init__(self, path1: Path, path2: Path, output_path: Path, epsilon: float, jinja2env: Jinja2Environment) -> None:
         self.path1 = path1
         self.path2 = path2
         self.epsilon = epsilon
         self.output_path = output_path
+        self.jinja2env = jinja2env
         self.__setup__()
         os.makedirs(self.output_path, exist_ok=True)
 
@@ -433,7 +670,7 @@ class ProjComparison:
     def compare_studies(self) -> ComparisonStatus:
         results: list[ComparisonStatus] = []
         for study in self.studies:
-            study_comp = StudyComparison(self.path1, self.path2, self.output_path, self.epsilon, study)
+            study_comp = StudyComparison(self.path1, self.path2, self.output_path, self.epsilon, study, self.jinja2env)
             results.append(study_comp.compare_study())
         return rollup_status(results)
 
@@ -442,8 +679,8 @@ class ProjComparison:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Comparing Performance Reports")
     parser.add_argument('--output',  '-o',  required=True, metavar='<outfile>',       help="Output Directory")
-    parser.add_argument('--dir1',    '-d1', required=True, metavar='<perf-report-1>', help="Projection Report-1 (root directory of projection run)")
-    parser.add_argument('--dir2',    '-d2', required=True, metavar='<perf-report-2>', help="Projection Report-2 (root directory of projection run)")
+    parser.add_argument('--dir1',    '-d1', required=True, metavar='<perf-report-1>', help="Projection Run-1 (root directory of projection run)")
+    parser.add_argument('--dir2',    '-d2', required=True, metavar='<perf-report-2>', help="Projection Run-2 (root directory of projection run)")
     parser.add_argument('--epsilon', '-e',  required=False, default=0.05, metavar='<error-bar>',     help="Error Bar(float), default=0.05, i.e. 5%%")
 
     if len(sys.argv) <= 1:
@@ -456,7 +693,9 @@ def main() -> int:
     path1 = Path(args.dir1)
     path2 = Path(args.dir2)
     output_path = Path(args.output)
-    cmp = ProjComparison(path1, path2, output_path, args.epsilon)
+    jinja2_env = Jinja2Environment()
+    statattr.AttributeDescriptors.setup_attribute_descriptors()
+    cmp = ProjComparison(path1, path2, output_path, args.epsilon, jinja2_env)
     result = cmp.compare_studies()
     if result == ComparisonStatus.Match:
         return 0
