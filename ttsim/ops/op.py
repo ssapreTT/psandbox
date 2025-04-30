@@ -1052,8 +1052,8 @@ class AveragePoolOp(SimOp):
             self.attrs['strides'] = strides
             self.attrs['pads'] = [0, 0, 0, 0]  # No padding for adaptive pooling
 
-            # Set output shape directly (batch_size, channels, output_height, output_width)
-            output_shape = input_shape[0:2] + list(output_size)
+            # Use pooling_shape_inference instead of direct shape setting
+            output_shape = pooling_shape_inference(input_shape, kernel_shape, self.attrs)
             outT[0].shape = output_shape
             outT[0].dtype = inT[0].dtype
         else:
